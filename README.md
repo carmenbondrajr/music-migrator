@@ -1,6 +1,6 @@
 # Spotify to YouTube Music Migrator
 
-A beautiful command-line tool to migrate your Spotify playlists and liked songs to YouTube Music with intelligent chunked processing and idempotent behavior.
+Migrate your owned playlists from one tech behemoth to another. Because a lesser of two evils is still less evil.  
 
 ## ✨ Features
 
