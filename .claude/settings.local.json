@@ -3,7 +3,8 @@
     "allow": [
       "WebSearch",
       "Bash(python:*)",
-      "Bash(ytmusicapi:*)"
+      "Bash(ytmusicapi:*)",
+      "Bash(make:*)"
     ],
     "deny": [],
     "ask": []

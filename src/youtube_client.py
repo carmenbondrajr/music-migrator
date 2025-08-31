@@ -163,7 +163,36 @@ class YouTubeClient:
     
     def create_playlist(self, title: str, description: str = "", privacy_status: str = "PRIVATE") -> Optional[str]:
         try:
+            # Check what account we're authenticated as
+            try:
+                account_info = self.yt.get_account_info()
+                print(f"🔐 Authenticated as: {account_info.get('name', 'Unknown')} ({account_info.get('accountName', 'Unknown')})")
+            except Exception as auth_check_e:
+                print(f"⚠️  Could not verify account info: {auth_check_e}")
+            
+            print(f"🎵 Attempting to create playlist: '{title}'")
+            print(f"   Description: '{description}'")
+            print(f"   Privacy: {privacy_status}")
+            
             playlist_id = self.yt.create_playlist(title, description, privacy_status)
+            print(f"✅ ytmusicapi returned playlist ID: {playlist_id}")
+            
+            # Immediately try to verify the playlist was actually created
+            try:
+                import time
+                time.sleep(1)  # Brief wait
+                test_playlist = self.yt.get_playlist(playlist_id)
+                print(f"✅ Verified playlist creation: {test_playlist.get('title', 'Unknown')} with {len(test_playlist.get('tracks', []))} tracks")
+                
+                # Skip the add test - empty list doesn't work and we don't want to add random songs
+                print("✅ Playlist creation verified successfully")
+                
+            except Exception as verify_e:
+                print(f"❌ Playlist creation verification failed: {verify_e}")
+                print(f"   Error type: {type(verify_e).__name__}")
+                print(f"   This suggests the playlist wasn't actually created despite getting an ID")
+                return None
+            
             self._cached_playlists = None
             return playlist_id
         except Exception as e:
@@ -171,6 +200,8 @@ class YouTubeClient:
                 return self._handle_auth_error("playlist creation")
             else:
                 print(f"Error creating playlist '{title}': {e}")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Full error: {str(e)}")
             return None
     
     def add_songs_to_playlist(self, playlist_id: str, video_ids: List[str]) -> bool:

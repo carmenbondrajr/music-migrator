@@ -107,28 +107,128 @@ def migrate():
     migrator = SpotifyToYouTubeMigrator()
     migrator.run_migration()
 
+def migrate_playlist():
+    """Interactive single playlist migration"""
+    if not validate_setup():
+        return
+    
+    ui = MigratorUI()
+    ui.show_welcome()
+    
+    migrator = SpotifyToYouTubeMigrator()
+    
+    # Initialize clients
+    if not migrator.initialize_clients():
+        return
+    
+    try:
+        # Get all playlists including liked songs
+        user_info = migrator.spotify.get_user_info()
+        all_playlists = migrator.spotify.get_user_playlists()
+        
+        # Filter to owned playlists
+        owned_playlists = [
+            playlist for playlist in all_playlists 
+            if playlist['owner'] == user_info['display_name'] or playlist['owner'] == user_info['id']
+        ]
+        
+        # Add Liked Songs
+        owned_playlists.append({
+            'id': 'liked_songs',
+            'name': 'Liked Songs',
+            'owner': user_info['display_name'],
+            'track_count': 'Unknown',
+            'public': False
+        })
+        
+        # Show playlist selection
+        ui.print_info(f"Found {len(owned_playlists)} playlists owned by you:")
+        ui.console.print()
+        
+        # Create numbered list
+        for i, playlist in enumerate(owned_playlists, 1):
+            status_icon = "✅" if migrator.state.is_playlist_completed(playlist['id']) else "📝"
+            track_info = f" ({playlist['track_count']} tracks)" if playlist['track_count'] != 'Unknown' else ""
+            ui.console.print(f"  {i:2}. {status_icon} {playlist['name']}{track_info}")
+        
+        ui.console.print()
+        ui.console.print("[dim]✅ = Previously migrated, 📝 = Not migrated[/dim]")
+        ui.console.print()
+        
+        # Get user selection
+        while True:
+            try:
+                choice = ui.console.input("[yellow]Enter playlist number (1-{}) or 'q' to quit: [/yellow]".format(len(owned_playlists)))
+                if choice.lower() == 'q':
+                    ui.print_info("Migration cancelled.")
+                    return
+                
+                playlist_idx = int(choice) - 1
+                if 0 <= playlist_idx < len(owned_playlists):
+                    break
+                else:
+                    ui.print_error(f"Please enter a number between 1 and {len(owned_playlists)}")
+            except ValueError:
+                ui.print_error("Please enter a valid number or 'q' to quit")
+        
+        selected_playlist = owned_playlists[playlist_idx]
+        is_liked_songs = selected_playlist['id'] == 'liked_songs'
+        
+        ui.print_info(f"Selected: {selected_playlist['name']}")
+        
+        # Check if already migrated
+        if migrator.state.is_playlist_completed(selected_playlist['id']):
+            ui.print_warning(f"This playlist was previously migrated.")
+            response = ui.console.input("[yellow]Re-process anyway? This will add any missing tracks (y/N): [/yellow]").lower()
+            if response not in ['y', 'yes']:
+                ui.print_info("Migration cancelled.")
+                return
+        
+        ui.console.print()
+        response = ui.console.input(f"[yellow]Start migration of '{selected_playlist['name']}'? (y/N): [/yellow]").lower()
+        if response not in ['y', 'yes']:
+            ui.print_info("Migration cancelled.")
+            return
+        
+        ui.print_info(f"🚀 Starting migration of '{selected_playlist['name']}'...")
+        
+        # Migrate the selected playlist (force re-process by not checking completed status)
+        success = migrator.migrate_playlist(selected_playlist, is_liked_songs, force_reprocess=True)
+        
+        if success:
+            ui.print_success(f"✅ Successfully migrated '{selected_playlist['name']}'!")
+        else:
+            ui.print_error(f"❌ Failed to migrate '{selected_playlist['name']}'")
+            
+    except KeyboardInterrupt:
+        ui.print_warning("Migration interrupted by user.")
+    except Exception as e:
+        ui.print_error(f"Migration failed: {e}")
+        raise
+
 def main():
     parser = argparse.ArgumentParser(
         description="Migrate Spotify playlists to YouTube Music",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py migrate        # Run the migration
-  python main.py setup-oauth    # Set up YouTube Music OAuth
-  python main.py validate       # Check configuration
+  python main.py migrate           # Run full migration
+  python main.py migrate-playlist  # Migrate a single playlist (interactive)
+  python main.py setup-oauth       # Set up YouTube Music OAuth
+  python main.py validate          # Check configuration
         """
     )
     
     parser.add_argument(
         'command',
-        choices=['migrate', 'setup-oauth', 'validate'],
+        choices=['migrate', 'migrate-playlist', 'setup-oauth', 'validate'],
         help='Command to run'
     )
     
     if len(sys.argv) == 1:
         ui = MigratorUI()
         ui.show_welcome()
-        ui.print_info("Usage: python main.py [migrate|setup-oauth|validate]")
+        ui.print_info("Usage: python main.py [migrate|migrate-playlist|setup-oauth|validate]")
         ui.print_info("Run 'python main.py validate' first to check your setup")
         return
     
@@ -136,6 +236,8 @@ Examples:
     
     if args.command == 'migrate':
         migrate()
+    elif args.command == 'migrate-playlist':
+        migrate_playlist()
     elif args.command == 'setup-oauth':
         setup_oauth()
     elif args.command == 'validate':

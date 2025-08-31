@@ -115,17 +115,71 @@ class SpotifyToYouTubeMigrator:
         
         return True
     
-    def migrate_playlist(self, spotify_playlist: Dict, is_liked_songs: bool = False) -> bool:
+    def migrate_playlist(self, spotify_playlist: Dict, is_liked_songs: bool = False, force_reprocess: bool = False) -> bool:
         playlist_name = "Liked Songs - Spot" if is_liked_songs else f"Spot {spotify_playlist['name']}"
         spotify_playlist_id = spotify_playlist['id']
         
-        existing_playlist_id = self.state.get_youtube_playlist_id(spotify_playlist_id)
-        if not existing_playlist_id:
+        # Handle force reprocess - temporarily remove from completed status
+        was_completed = False
+        if force_reprocess and self.state.is_playlist_completed(spotify_playlist_id):
+            was_completed = True
+            # Temporarily remove from completed list to allow reprocessing
+            if isinstance(self.state.state['completed_playlists'], set):
+                self.state.state['completed_playlists'].discard(spotify_playlist_id)
+            elif isinstance(self.state.state['completed_playlists'], list):
+                if spotify_playlist_id in self.state.state['completed_playlists']:
+                    self.state.state['completed_playlists'].remove(spotify_playlist_id)
+        
+        if force_reprocess:
+            # Force reprocess: ignore all cached data and start fresh
+            self.ui.print_info("🔄 Force reprocess: Ignoring cached playlist and starting fresh...")
+            
+            # Clear ALL cached data for this playlist
+            if spotify_playlist_id in self.state.state['playlists']:
+                cached_name = self.state.state['playlists'][spotify_playlist_id].get('name', 'Unknown')
+                cached_id = self.state.state['playlists'][spotify_playlist_id].get('youtube_id', 'Unknown')
+                self.ui.print_info(f"🧹 Clearing cached playlist: {cached_name} (ID: {cached_id})")
+                del self.state.state['playlists'][spotify_playlist_id]
+            
+            # Remove from completed playlists
+            if isinstance(self.state.state['completed_playlists'], set):
+                self.state.state['completed_playlists'].discard(spotify_playlist_id)
+            elif isinstance(self.state.state['completed_playlists'], list):
+                if spotify_playlist_id in self.state.state['completed_playlists']:
+                    self.state.state['completed_playlists'].remove(spotify_playlist_id)
+            
+            # Clear track cache for this playlist  
+            tracks_to_remove = [key for key in self.state.state['tracks'].keys() if key.startswith(f'{spotify_playlist_id}:')]
+            for track_key in tracks_to_remove:
+                del self.state.state['tracks'][track_key]
+            
+            if tracks_to_remove:
+                self.ui.print_info(f"🧹 Cleared {len(tracks_to_remove)} cached track entries")
+            
+            self.state.save_state()  # Save the cleared cache immediately
+            
+            # Now do a fresh lookup to see if playlist exists in YouTube Music
+            self.ui.print_info(f"🔍 Checking if playlist '{playlist_name}' exists in YouTube Music...")
             existing_playlist_id = self.youtube.playlist_exists(playlist_name)
+        else:
+            # Normal mode: use cached data
+            existing_playlist_id = self.state.get_youtube_playlist_id(spotify_playlist_id)
+            if not existing_playlist_id:
+                existing_playlist_id = self.youtube.playlist_exists(playlist_name)
         
         if existing_playlist_id:
             self.ui.show_playlist_status(playlist_name, 'exists', 'yellow')
             youtube_playlist_id = existing_playlist_id
+            
+            # Verify the playlist is actually accessible
+            if force_reprocess:
+                try:
+                    test_tracks = self.youtube.get_playlist_tracks(existing_playlist_id)
+                    self.ui.print_info(f"✅ Verified playlist is accessible with {len(test_tracks)} existing tracks")
+                except Exception as e:
+                    self.ui.print_error(f"❌ Playlist exists but is not accessible: {e}")
+                    self.ui.print_info("This might be a permissions issue or the playlist was deleted")
+                    return False
         else:
             self.ui.show_playlist_status(playlist_name, 'creating', 'blue')
             description = f"Migrated from Spotify {'Liked Songs' if is_liked_songs else 'playlist'}"
@@ -136,6 +190,21 @@ class SpotifyToYouTubeMigrator:
                 return False
             
             self.ui.show_playlist_status(playlist_name, 'created', 'green')
+            self.ui.print_info(f"✅ Created playlist with ID: {youtube_playlist_id}")
+            
+            # Immediately verify the created playlist is accessible
+            import time
+            self.ui.print_info("⏳ Waiting 2 seconds for playlist to be fully created...")
+            time.sleep(2)
+            
+            try:
+                test_tracks = self.youtube.get_playlist_tracks(youtube_playlist_id)
+                self.ui.print_info(f"✅ Verified new playlist is accessible")
+            except Exception as e:
+                self.ui.print_error(f"❌ Created playlist but it's not accessible: {e}")
+                self.ui.print_info("This might be a YouTube Music API issue")
+                return False
+            
             self.summary['playlists_created'] += 1
         
         self.state.set_youtube_playlist_id(spotify_playlist_id, youtube_playlist_id, playlist_name)
@@ -165,18 +234,22 @@ class SpotifyToYouTubeMigrator:
         # Process tracks in chunks for better progress feedback and resilience
         return self._process_tracks_in_chunks(
             tracks, spotify_playlist_id, youtube_playlist_id, 
-            playlist_name, existing_youtube_tracks
+            playlist_name, existing_youtube_tracks, force_reprocess
         )
         
     def _process_tracks_in_chunks(self, tracks: List[Dict], spotify_playlist_id: str, 
                                  youtube_playlist_id: str, playlist_name: str, 
-                                 existing_youtube_tracks: Set[str]) -> bool:
+                                 existing_youtube_tracks: Set[str], force_reprocess: bool = False) -> bool:
         chunk_size = 200
         total_tracks = len(tracks)
         tracks_processed = 0
         total_added = 0
         
-        self.ui.print_info(f"Processing {total_tracks} tracks in chunks of {chunk_size}...")
+        if force_reprocess:
+            self.ui.print_info(f"🔄 Force reprocessing {total_tracks} tracks in chunks of {chunk_size}...")
+            self.ui.print_info("   Re-searching all tracks but avoiding duplicates")
+        else:
+            self.ui.print_info(f"Processing {total_tracks} tracks in chunks of {chunk_size}...")
         
         for chunk_start in range(0, total_tracks, chunk_size):
             chunk_end = min(chunk_start + chunk_size, total_tracks)
@@ -190,10 +263,11 @@ class SpotifyToYouTubeMigrator:
             for track in chunk:
                 tracks_processed += 1
                 
-                # Check if track was already successfully migrated
+                # Handle cached tracks differently based on force_reprocess
                 cached_track = self.state.get_track_status(track['id'], spotify_playlist_id)
-                if cached_track and cached_track.get('status') == 'found':
-                    # Check if the cached video is already in the YouTube playlist
+                
+                if not force_reprocess and cached_track and cached_track.get('status') == 'found':
+                    # Normal mode: use cached results
                     cached_video_id = cached_track.get('youtube_video_id')
                     if cached_video_id and cached_video_id in existing_youtube_tracks:
                         self.ui.show_track_status(track['name'], ', '.join(track['artists']), 'exists')
@@ -204,8 +278,8 @@ class SpotifyToYouTubeMigrator:
                         self.ui.show_track_status(track['name'], ', '.join(track['artists']), 'cached')
                         continue
                 
-                # Skip if track was previously marked as not found
-                if cached_track and cached_track.get('status') == 'not_found':
+                # Skip tracks previously marked as not found (unless force reprocessing)
+                if not force_reprocess and cached_track and cached_track.get('status') == 'not_found':
                     self.ui.show_track_status(track['name'], ', '.join(track['artists']), 'skipped')
                     continue
                 
@@ -273,14 +347,34 @@ class SpotifyToYouTubeMigrator:
         batch_size = 50
         total_added = 0
         
+        self.ui.print_info(f"🎵 Adding {len(video_ids)} tracks to playlist ID: {youtube_playlist_id}")
+        
         for i in range(0, len(video_ids), batch_size):
             batch = video_ids[i:i + batch_size]
+            
+            # Try adding the batch, with one retry after a delay
             success = self.youtube.add_songs_to_playlist(youtube_playlist_id, batch)
+            if not success:
+                self.ui.print_warning(f"⚠️  First attempt failed, waiting 3 seconds and retrying...")
+                import time
+                time.sleep(3)
+                success = self.youtube.add_songs_to_playlist(youtube_playlist_id, batch)
+            
             if success:
                 total_added += len(batch)
                 self.ui.print_info(f"✅ Added batch of {len(batch)} tracks to {playlist_name}")
             else:
                 self.ui.print_warning(f"❌ Failed to add batch of {len(batch)} tracks to {playlist_name}")
+                self.ui.print_warning(f"   Playlist ID: {youtube_playlist_id}")
+                self.ui.print_warning(f"   First few video IDs: {batch[:3]}")
+                
+                # Check if the playlist still exists
+                try:
+                    self.youtube.get_playlist_tracks(youtube_playlist_id)
+                    self.ui.print_warning("   Playlist exists but batch add failed - might be API quota or video ID issue")
+                except Exception as e:
+                    self.ui.print_warning(f"   Playlist no longer exists: {e}")
+                    break  # No point continuing if playlist is gone
         
         return total_added
     

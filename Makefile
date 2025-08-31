@@ -1,4 +1,4 @@
-.PHONY: help install setup validate migrate setup-oauth ytmusic-setup-oauth clean status deps-check retry-failed
+.PHONY: help install setup validate migrate migrate-playlist setup-oauth ytmusic-setup-oauth clean status deps-check retry-failed
 
 # Default target
 help:
@@ -10,7 +10,8 @@ help:
 	@echo "  make setup-oauth        - Setup YouTube Music OAuth authentication (interactive)"
 	@echo "  make ytmusic-setup-oauth - Setup YouTube Music OAuth using .env credentials"
 	@echo "  make validate           - Check configuration and credentials"
-	@echo "  make migrate      - Run the migration process"
+	@echo "  make migrate         - Run the migration process"
+	@echo "  make migrate-playlist - Migrate a single playlist (interactive selection)"
 	@echo "  make retry-failed - Retry tracks that failed during migration"
 	@echo "  make test-pagination - Test Spotify Liked Songs pagination"
 	@echo "  make reset-liked     - Reset Liked Songs migration state for re-processing"
@@ -94,6 +95,11 @@ validate: deps-check
 migrate: deps-check
 	@echo "🚀 Starting migration..."
 	python main.py migrate
+
+# Interactive single playlist migration
+migrate-playlist: deps-check
+	@echo "🎯 Interactive playlist migration..."
+	python main.py migrate-playlist
 
 # Show migration status
 status:
